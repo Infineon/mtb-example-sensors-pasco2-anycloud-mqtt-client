@@ -24,6 +24,7 @@
  */
 
 /* Header file from system */
+#include <inttypes.h>
 #include <stdio.h>
 
 /* Header file includes */
@@ -34,6 +35,7 @@
 #include "pasco2_config_task.h"
 #include "pasco2_task.h"
 #include "publisher_task.h"
+#include "xensiv_dps3xx_mtb.h"
 
 /* Output pin for sensor PSEL line */
 #define MTB_PASCO2_PSEL (P5_3)
@@ -57,25 +59,24 @@
 /* I2C bus frequency */
 #define I2C_MASTER_FREQUENCY (100000U)
 
+#define DEFAULT_PRESSURE_VALUE (1015.0F)
+
 /* Delay time after hardware initialization */
 #define PASCO2_INITIALIZATION_DELAY (2000)
-/* Delay time for retry when sensor data is not ready */
-#define PASCO2_RETRY_DELAY (1000)
 
 /*******************************************************************************
  * Global Variables
  ******************************************************************************/
 TaskHandle_t pasco2_task_handle = NULL;
-
 /* Semaphore to protect PASCO2 driver context */
 SemaphoreHandle_t sem_pasco2_context = NULL;
-/* CO2 driver context */
-mtb_pasco2_context_t mtb_pasco2_context = {0};
+xensiv_pasco2_t xensiv_pasco2 = {0};
+/* Delay time after each call to PAS CO2 Process.Default is 10 seconds */
+uint32_t pasco2_process_delay_s = 10;
 
 /*******************************************************************************
  * Local Variables
  ******************************************************************************/
-static char local_pub_msg[MQTT_PUB_MSG_MAX_SIZE] = {0};
 
 /*******************************************************************************
  * Function Name: pasco2_task
@@ -97,6 +98,9 @@ void pasco2_task(void *pvParameters)
     /* To avoid compiler warnings */
     (void)pvParameters;
 
+    xensiv_dps3xx_t xensiv_dps3xx;
+    bool use_dps = true;
+
     /* I2C variables */
     cyhal_i2c_t cyhal_i2c;
 
@@ -116,34 +120,62 @@ void pasco2_task(void *pvParameters)
         CY_ASSERT(0);
     }
 
-    /* Initialize and enable PAS CO2 Wing Board power switch */
-    cyhal_gpio_init(MTB_PASCO2_POWER_SWITCH, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, MTB_PASCO2_POWER_ON);
     /* Initialize and enable PAS CO2 Wing Board I2C channel communication*/
-    cyhal_gpio_init(MTB_PASCO2_PSEL, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, MTB_PASCO2_PSEL_I2C_ENABLE);
+    result = cyhal_gpio_init(MTB_PASCO2_PSEL, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, MTB_PASCO2_PSEL_I2C_ENABLE);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+
+    /* Initialize and enable PAS CO2 Wing Board power switch */
+    result = cyhal_gpio_init(MTB_PASCO2_POWER_SWITCH, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, MTB_PASCO2_POWER_ON);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+
     /* Initialize the LEDs on PAS CO2 Wing Board */
-    cyhal_gpio_init(MTB_PASCO2_LED_OK, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, MTB_PASCO_LED_STATE_OFF);
-    cyhal_gpio_init(MTB_PASCO2_LED_WARNING, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, MTB_PASCO_LED_STATE_OFF);
+    result = cyhal_gpio_init(MTB_PASCO2_LED_OK, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, MTB_PASCO_LED_STATE_OFF);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+
+    result = cyhal_gpio_init(MTB_PASCO2_LED_WARNING, CYHAL_GPIO_DIR_OUTPUT, CYHAL_GPIO_DRIVE_STRONG, MTB_PASCO_LED_STATE_OFF);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
 
     /* Delay 2s to wait for pasco2 sensor get ready */
     vTaskDelay(pdMS_TO_TICKS(PASCO2_INITIALIZATION_DELAY));
 
-    /* Initialize PAS CO2 sensor with default parameter values */
-    result = mtb_pasco2_init(&mtb_pasco2_context, &cyhal_i2c);
+    result = xensiv_dps3xx_mtb_init_i2c(&xensiv_dps3xx, &cyhal_i2c, XENSIV_DPS3XX_I2C_ADDR_ALT);
     if (result != CY_RSLT_SUCCESS)
     {
-        /* \x1b[2J\x1b[;H - ANSI ESC sequence for clear screen */
-        // printf("\x1b[2J\x1b[;H");
-        if (CY_RSLT_GET_CODE(result) == MTB_PASCO2_SENSOR_NOT_FOUND)
-        {
-            printf("PAS CO2 Wing Board not found... Task suspend\n\n");
-        }
-        else
-        {
-            printf("An unexpected occurred during initialization of CO2 sensor, task suspend.\n\n");
-        }
-        vTaskSuspend(NULL);
+        use_dps = false;
     }
 
+    /* Initialize PAS CO2 sensor with default parameter values */
+    result = xensiv_pasco2_mtb_init_i2c(&xensiv_pasco2, &cyhal_i2c);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        printf("PAS CO2 device initialization error\n");
+        printf("Exiting pasco2_task task\n");
+        // exit current thread (suspend)
+        vTaskSuspend(NULL);
+    }
+    /* Configure PAS CO2 Wing board interrupt to enable voltage converter */
+    xensiv_pasco2_interrupt_config_t int_config = {
+    .b.int_func = XENSIV_PASCO2_INTERRUPT_FUNCTION_EARLY,
+    .b.int_typ = (uint32_t)XENSIV_PASCO2_INTERRUPT_TYPE_HIGH_ACTIVE
+    };
+    result = xensiv_pasco2_set_interrupt_config(&xensiv_pasco2, int_config);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        printf("PAS CO2 interrupt configuration error");
+        CY_ASSERT(0);
+    }
     /* Initiate semaphore mutex to protect 'pasco2_context' */
     sem_pasco2_context = xSemaphoreCreateMutex();
     if (sem_pasco2_context == NULL)
@@ -167,10 +199,18 @@ void pasco2_task(void *pvParameters)
         CY_ASSERT(0);
     }
 
-    /* Turn off User LED on CYSBSYSKIT-DEV-01 to indicate successful initialization of CO2 Wing Board */
-    cyhal_gpio_write(CYBSP_USER_LED, CYBSP_LED_STATE_OFF);
+    /* Stop LED blinking timer, turn on LED to indicate user that turn-on phase is over and entering ready state */
+    result = cyhal_timer_stop(&led_blink_timer);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+    cyhal_gpio_write(CYBSP_USER_LED, false); /* USER_LED is active low */
     /* Turn on status LED on PAS CO2 Wing Board to indicate normal operation */
     cyhal_gpio_write(MTB_PASCO2_LED_OK, MTB_PASCO_LED_STATE_ON);
+
+    publisher_data_t publisher_q_data = {0};
+    publisher_q_data.cmd = PUBLISH_MQTT_MSG;
 
     for (;;)
     {
@@ -178,77 +218,89 @@ void pasco2_task(void *pvParameters)
 
         if (xSemaphoreTake(sem_pasco2_context, portMAX_DELAY) == pdTRUE)
         {
+            /* Read pressure value from sensor */
+        float32_t pressure;
+        if (use_dps == true)
+        {
+            float32_t temperature;
+            /* Read pressure value from sensor */
+            result = xensiv_dps3xx_read(&xensiv_dps3xx, &pressure, &temperature);
+            if (result != CY_RSLT_SUCCESS)
+            {
+                printf("Error while reading from pressure sensor\r\n");
+                CY_ASSERT(0);
+            }
+        }
+        else
+        {
+            pressure = DEFAULT_PRESSURE_VALUE;
+        }
             /* Read CO2 value from sensor */
-            result = mtb_pasco2_get_ppm(&mtb_pasco2_context, &ppm);
+            result = xensiv_pasco2_mtb_read(&xensiv_pasco2, (uint16_t)pressure, &ppm);
+
             xSemaphoreGive(sem_pasco2_context);
         }
 
         if (result == CY_RSLT_SUCCESS)
         {
-            /* New CO2 value is successfully read from sensor and print it to serial console */
-            printf("CO2 PPM Level: %d\r\n", ppm);
-
             /* Turn-off warning LED*/
             cyhal_gpio_write(MTB_PASCO2_LED_WARNING, MTB_PASCO_LED_STATE_OFF);
 
-            snprintf(local_pub_msg, sizeof(local_pub_msg), "{\"CO2 PPM Level\": \"%d\"}", ppm);
+            memset(publisher_q_data.data, 0, sizeof(publisher_q_data.data));
+            snprintf(publisher_q_data.data, sizeof(publisher_q_data.data), "{\"CO2 PPM Level\": \"%d\"}", ppm);
             /**
              * Send message back to publish queue. If queue is full, 'local_pub_msg' will be dropped.
              * So no result checking. */
-            xQueueSendToBack(mqtt_pub_q, local_pub_msg, 0);
-
-            vTaskDelay(PASCO2_PROCESS_DELAY);
-            continue;
+            xQueueSendToBack(publisher_task_q, &publisher_q_data, 0);
         }
-        else if (CY_RSLT_GET_TYPE(result) == CY_RSLT_TYPE_INFO)
+        else
         {
-            /* Sensor gave other information than CO2 value */
-            if (CY_RSLT_GET_CODE(result) == MTB_PASCO2_PPM_PENDING)
+            if (CY_RSLT_GET_CODE(result) == XENSIV_PASCO2_READ_NRDY)
             {
                 /* New value is not available yet */
-                printf("[INFO]: CO2 PPM value is not ready\r\n");
+                printf("CO2 PPM value is not ready\n");
             }
-            else if (CY_RSLT_GET_CODE(result) == MTB_PASCO2_SENSOR_BUSY)
+            else if (CY_RSLT_GET_CODE(result) == XENSIV_PASCO2_ERR_COMM)
             {
-                /* Sensor is busy in internal processing */
-                printf("[INFO]: CO2 sensor is busy\r\n");
+                /* I2C communication error */
+                printf("I2C communication error\n");
             }
             else
             {
-                printf("[INFO]: An unexpected occurred when accessing the CO2 sensor\r\n");
+                printf("Unexpected error\n");
+            }
+        }
+
+        xensiv_pasco2_status_t sensor_status;
+        if (xensiv_pasco2_get_status(&xensiv_pasco2, &sensor_status) == CY_RSLT_SUCCESS)
+        {
+            bool error_status = false;
+            if (sensor_status.u & XENSIV_PASCO2_REG_SENS_STS_ICCER_MSK)
+            {
+                /* Sensor detected communication problem with MCU */
+                printf("CO2 Sensor Communication Error\n");
+                error_status = true;
             }
 
-            /* Turn-Off warning LED */
-            cyhal_gpio_write(MTB_PASCO2_LED_WARNING, MTB_PASCO_LED_STATE_OFF);
-
-            /* Sensor is polled in 'PASCO2_RETRY_DELAY' again */
-            vTaskDelay(PASCO2_RETRY_DELAY);
-        }
-        else if (CY_RSLT_GET_TYPE(result) == CY_RSLT_TYPE_WARNING)
-        {
-            /* Sensor gave a warning regarding over-voltage, temperature, or communication problem */
-            switch (CY_RSLT_GET_CODE(result))
+            if (sensor_status.u & XENSIV_PASCO2_REG_SENS_STS_ORVS_MSK)
             {
-                case MTB_PASCO2_VOLTAGE_ERROR:
-                    /* Sensor detected over-voltage problem */
-                    printf("[WARNING]: CO2 Sensor Over-Voltage Error\r\n");
-                    break;
-                case MTB_PASCO2_TEMPERATURE_ERROR:
-                    /* Sensor detected temperature problem */
-                    printf("[WARNING]: CO2 Sensor Temperature Error\r\n");
-                    break;
-                case MTB_PASCO2_COMMUNICATION_ERROR:
-                    /* Sensor detected communication problem with MCU */
-                    printf("[WARNING]: CO2 Sensor Communication Error\r\n");
-                    break;
-                default:
-                    printf("[WARNING]: Unexpected error\r\n");
-                    break;
+                /* Sensor detected over-voltage problem */
+                printf("CO2 Sensor Over-Voltage Error\n");
+                error_status = true;
+            }
+
+            if (sensor_status.u & XENSIV_PASCO2_REG_SENS_STS_ORTMP_MSK)
+            {
+                /* Sensor detected temperature problem */
+                printf("CO2 Sensor Temperature Error\n");
+                error_status = true;
             }
 
             /* Turn-On warning LED to indicate warning to user from sensor */
-            cyhal_gpio_write(MTB_PASCO2_LED_WARNING, MTB_PASCO_LED_STATE_ON);
+            cyhal_gpio_write(MTB_PASCO2_LED_WARNING, error_status ? MTB_PASCO_LED_STATE_ON : MTB_PASCO_LED_STATE_OFF);
         }
+
+        vTaskDelay(pdMS_TO_TICKS(pasco2_process_delay_s*1000));
     }
 }
 

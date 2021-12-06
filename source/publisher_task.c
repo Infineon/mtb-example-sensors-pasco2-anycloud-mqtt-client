@@ -26,55 +26,65 @@
  * ===========================================================================
  */
 
-#include "FreeRTOS.h"
-#include "cybsp.h"
 #include "cyhal.h"
+#include "cybsp.h"
+#include "FreeRTOS.h"
 
 /* Task header files */
-#include "mqtt_task.h"
 #include "publisher_task.h"
+#include "mqtt_task.h"
 #include "subscriber_task.h"
 
 /* Configuration file for MQTT client */
 #include "mqtt_client_config.h"
 
 /* Middleware libraries */
+#include "cy_mqtt_api.h"
 #include "cy_retarget_io.h"
-#include "iot_mqtt.h"
 
 /*******************************************************************************
  * Macros
  ******************************************************************************/
 /* The maximum number of times each PUBLISH in this example will be retried. */
-#define PUBLISH_RETRY_LIMIT (10)
+#define PUBLISH_RETRY_LIMIT             (10)
 
 /* A PUBLISH message is retried if no response is received within this
  * time (in milliseconds).
  */
-#define PUBLISH_RETRY_MS (1000)
+#define PUBLISH_RETRY_MS                (1000)
 
-/*******************************************************************************
- * Global Variables
- ******************************************************************************/
+/* Queue length of a message queue that is used to communicate with the
+ * publisher task.
+ */
+#define PUBLISHER_TASK_QUEUE_LENGTH     (3u)
+
+/******************************************************************************
+* Global Variables
+*******************************************************************************/
 /* FreeRTOS task handle for this task. */
 TaskHandle_t publisher_task_handle;
 
-QueueHandle_t mqtt_pub_q;
+/* Handle of the queue holding the commands for the publisher task */
+QueueHandle_t publisher_task_q;
 
 /* Structure to store publish message information. */
-IotMqttPublishInfo_t publishInfo = {.qos = (IotMqttQos_t)MQTT_MESSAGES_QOS,
-                                    .pTopicName = MQTT_PUB_TOPIC,
-                                    .topicNameLength = (sizeof(MQTT_PUB_TOPIC) - 1),
-                                    .retryMs = PUBLISH_RETRY_MS,
-                                    .retryLimit = PUBLISH_RETRY_LIMIT};
+cy_mqtt_publish_info_t publish_info =
+{
+    .qos = (cy_mqtt_qos_t) MQTT_MESSAGES_QOS,
+    .topic = MQTT_PUB_TOPIC,
+    .topic_len = (sizeof(MQTT_PUB_TOPIC) - 1),
+    .retain = false,
+    .dup = false
+};
 
 /******************************************************************************
  * Function Name: publisher_task
  ******************************************************************************
  * Summary:
- *  Task that handles initialization of the user button GPIO, configuration of
- *  ISR, and publishing of MQTT messages to control the device that is actuated
- *  by the subscriber task.
+ *  Task that sets up the user button GPIO for the publisher and publishes
+ *  MQTT messages to the broker. The user button init and deinit operations,
+ *  and the MQTT publish operation is performed based on commands sent by other
+ *  tasks and callbacks over a message queue.
  *
  * Parameters:
  *  void *pvParameters : Task parameter defined during task creation (unused)
@@ -86,72 +96,64 @@ IotMqttPublishInfo_t publishInfo = {.qos = (IotMqttQos_t)MQTT_MESSAGES_QOS,
 void publisher_task(void *pvParameters)
 {
     /* Status variable */
-    int result;
+    cy_rslt_t result;
 
-    /* Status of MQTT publish operation that will be communicated to MQTT
-     * client task using a message queue in case of failure during publish.
-     */
-    mqtt_result_t mqtt_publish_status = MQTT_PUBLISH_FAILURE;
+    publisher_data_t publisher_q_data = {0};
+
+    /* Command to the MQTT client task */
+    mqtt_task_cmd_t mqtt_task_cmd;
 
     /* To avoid compiler warnings */
-    (void)pvParameters;
+    (void) pvParameters;
 
-    mqtt_pub_q = xQueueCreate(MQTT_PUB_QUEUE_LENGTH, MQTT_PUB_MSG_MAX_SIZE);
-    if (mqtt_pub_q == NULL)
-    {
-        printf(" 'mqtt_pub_q' queue creation failed... Task suspend\n\n");
-        vTaskSuspend(NULL);
-    }
-
-    /* Variable to receive new publish message from 'mqtt_pub_q' */
-    char pub_msg[MQTT_PUB_MSG_MAX_SIZE];
+    /* Create a message queue to communicate with other tasks and callbacks. */
+    publisher_task_q = xQueueCreate(PUBLISHER_TASK_QUEUE_LENGTH, sizeof(publisher_data_t));
 
     while (true)
     {
-        memset(pub_msg, '\0', MQTT_PUB_MSG_MAX_SIZE);
-        /* Wait for publish requirement from other tasks and callbacks. */
-        if (pdTRUE == xQueueReceive(mqtt_pub_q, pub_msg, portMAX_DELAY))
+        /* Wait for commands from other tasks and callbacks. */
+        if (pdTRUE == xQueueReceive(publisher_task_q, &publisher_q_data, portMAX_DELAY))
         {
-            /* Assign the publish message payload according to received device state. */
-            publishInfo.pPayload = pub_msg;
-            publishInfo.payloadLength = strlen(publishInfo.pPayload);
-
-            printf("Publishing '%s' on the topic '%s'\n\n", (char *)publishInfo.pPayload, publishInfo.pTopicName);
-
-            /* Publish the MQTT message with the configured settings. */
-            result = IotMqtt_PublishSync(mqttConnection, &publishInfo, 0, MQTT_TIMEOUT_MS);
-
-            if (result != IOT_MQTT_SUCCESS)
+            switch(publisher_q_data.cmd)
             {
-                /* Inform the MQTT client task about the publish failure and suspend
-                 * the task for it to be killed by the MQTT client task later.
-                 */
-                printf("MQTT Publish failed with error '%s'.\n\n", IotMqtt_strerror((IotMqttError_t)result));
-                xQueueOverwrite(mqtt_status_q, &mqtt_publish_status);
-                vTaskSuspend(NULL);
+                case PUBLISHER_INIT:
+                {
+                    /* Reserved for customer extension. */
+                    break;
+                }
+
+                case PUBLISHER_DEINIT:
+                {
+                    /* Reserved for customer extension. */
+                    break;
+                }
+
+                case PUBLISH_MQTT_MSG:
+                {
+                    /* Publish the data received over the message queue. */
+                    publish_info.payload = publisher_q_data.data;
+                    publish_info.payload_len = strlen(publish_info.payload);
+
+                    printf("  Publisher: Publishing '%s' on the topic '%s'\n\n",
+                           (char *) publish_info.payload, publish_info.topic);
+
+                    result = cy_mqtt_publish(mqtt_connection, &publish_info);
+
+                    if (result != CY_RSLT_SUCCESS)
+                    {
+                        printf("  Publisher: MQTT Publish failed with error 0x%0X.\n\n", (int)result);
+
+                        /* Communicate the publish failure with the the MQTT
+                         * client task.
+                         */
+                        mqtt_task_cmd = HANDLE_MQTT_PUBLISH_FAILURE;
+                        xQueueSend(mqtt_task_q, &mqtt_task_cmd, portMAX_DELAY);
+                    }
+                    break;
+                }
             }
         }
     }
-}
-
-/******************************************************************************
- * Function Name: publisher_cleanup
- ******************************************************************************
- * Summary:
- *  Cleanup function for the publisher task that disables the user button
- *  interrupt. This operation needs to be necessarily performed before deleting
- *  the publisher task.
- *
- * Parameters:
- *  void
- *
- * Return:
- *  void
- *
- ******************************************************************************/
-void publisher_cleanup(void)
-{
-    vQueueDelete(mqtt_pub_q);
 }
 
 /* [] END OF FILE */

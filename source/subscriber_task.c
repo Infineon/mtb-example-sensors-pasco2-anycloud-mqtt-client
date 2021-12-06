@@ -40,19 +40,21 @@
 #include "mqtt_client_config.h"
 
 /* Middleware libraries */
+#include "cy_mqtt_api.h"
 #include "cy_retarget_io.h"
-#include "iot_mqtt.h"
 
 /******************************************************************************
- * Macros
- ******************************************************************************/
+* Macros
+******************************************************************************/
+/* Maximum number of retries for MQTT subscribe operation */
+#define MAX_SUBSCRIBE_RETRIES                   (3u)
+
+/* Time interval in milliseconds between MQTT subscribe retries. */
+#define MQTT_SUBSCRIBE_RETRY_INTERVAL_MS        (1000)
+
 /* The number of MQTT topics to be subscribed to. */
-#define SUBSCRIPTION_COUNT (1)
+#define SUBSCRIPTION_COUNT                      (1)
 
-/******************************************************************************
- * Function Prototypes
- *******************************************************************************/
-static void mqtt_subscription_callback(void *pCallbackContext, IotMqttCallbackParam_t *pPublishInfo);
 
 /******************************************************************************
  * Global Variables
@@ -60,12 +62,22 @@ static void mqtt_subscription_callback(void *pCallbackContext, IotMqttCallbackPa
 /* Task handle for this task. */
 TaskHandle_t subscriber_task_handle;
 
+/* Handle of the queue holding the commands for the subscriber task */
+QueueHandle_t subscriber_task_q;
+
 /* Configure the subscription information structure. */
-IotMqttSubscription_t subscribeInfo = {.qos = (IotMqttQos_t)MQTT_MESSAGES_QOS,
-                                       .pTopicFilter = MQTT_SUB_TOPIC,
-                                       .topicFilterLength = (sizeof(MQTT_SUB_TOPIC) - 1),
-                                       /* Configure the callback function to handle incoming MQTT messages */
-                                       .callback.function = mqtt_subscription_callback};
+cy_mqtt_subscribe_info_t subscribe_info =
+{
+    .qos = (cy_mqtt_qos_t) MQTT_MESSAGES_QOS,
+    .topic = MQTT_SUB_TOPIC,
+    .topic_len = (sizeof(MQTT_SUB_TOPIC) - 1)
+};
+
+/******************************************************************************
+* Function Prototypes
+*******************************************************************************/
+static void subscribe_to_topic(void);
+static void unsubscribe_from_topic(void);
 
 /* Semaphore used to protect message payload */
 SemaphoreHandle_t sem_sub_payload = NULL;
@@ -76,8 +88,10 @@ char sub_msg_payload[512] = {0};
  * Function Name: subscriber_task
  ******************************************************************************
  * Summary:
- *  Task that sets up the user LED GPIO, subscribes to topic - 'MQTT_SUB_TOPIC',
- *  and controls the user LED based on the received task notification.
+ *  Task that sets up the user LED GPIO, subscribes to the specified MQTT topic,
+ *  and controls the user LED based on the received commands over the message
+ *  queue. The task can also unsubscribe from the topic based on the commands
+ *  via the message queue.
  *
  * Parameters:
  *  void *pvParameters : Task parameter defined during task creation (unused)
@@ -88,16 +102,10 @@ char sub_msg_payload[512] = {0};
  ******************************************************************************/
 void subscriber_task(void *pvParameters)
 {
-    /* Status variable */
-    int result = EXIT_SUCCESS;
-
-    /* Status of MQTT subscribe operation that will be communicated to MQTT
-     * client task using a message queue in case of failure in subscription.
-     */
-    mqtt_result_t mqtt_subscribe_status = MQTT_SUBSCRIBE_FAILURE;
+    subscriber_data_t subscriber_q_data;
 
     /* To avoid compiler warnings */
-    (void)pvParameters;
+    (void) pvParameters;
 
     /* Initialize semaphore to protect payload */
     sem_sub_payload = xSemaphoreCreateMutex();
@@ -107,23 +115,82 @@ void subscriber_task(void *pvParameters)
         vTaskSuspend(NULL);
     }
 
-    /* Subscribe with the configured parameters. */
-    result = IotMqtt_SubscribeSync(mqttConnection, &subscribeInfo, SUBSCRIPTION_COUNT, 0, MQTT_TIMEOUT_MS);
-    if (result != EXIT_SUCCESS)
+    /* Subscribe to the specified MQTT topic. */
+    subscribe_to_topic();
+
+    /* Create a message queue to communicate with other tasks and callbacks. */
+    subscriber_task_q = xQueueCreate(MQTT_SUB_QUEUE_LENGTH, sizeof(subscriber_data_t));
+
+    while (true)
     {
-        /* Notify the MQTT client task about the subscription failure and
-         * suspend the task for it to be killed by the MQTT client task later.
-         */
-        printf("MQTT Subscribe failed with error '%s'.\n\n", IotMqtt_strerror((IotMqttError_t)result));
-        xQueueOverwrite(mqtt_status_q, &mqtt_subscribe_status);
-        vTaskSuspend(NULL);
+        /* Wait for commands from other tasks and callbacks. */
+        if (pdTRUE == xQueueReceive(subscriber_task_q, &subscriber_q_data, portMAX_DELAY))
+        {
+            switch(subscriber_q_data.cmd)
+            {
+                case SUBSCRIBE_TO_TOPIC:
+                {
+                    subscribe_to_topic();
+                    break;
+                }
+
+                case UNSUBSCRIBE_FROM_TOPIC:
+                {
+                    unsubscribe_from_topic();
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/******************************************************************************
+ * Function Name: subscribe_to_topic
+ ******************************************************************************
+ * Summary:
+ *  Function that subscribes to the MQTT topic specified by the macro
+ *  'MQTT_SUB_TOPIC'. This operation is retried a maximum of
+ *  'MAX_SUBSCRIBE_RETRIES' times with interval of
+ *  'MQTT_SUBSCRIBE_RETRY_INTERVAL_MS' milliseconds.
+ *
+ * Parameters:
+ *  void
+ *
+ * Return:
+ *  void
+ *
+ ******************************************************************************/
+static void subscribe_to_topic(void)
+{
+    /* Status variable */
+    cy_rslt_t result = CY_RSLT_SUCCESS;
+
+    /* Command to the MQTT client task */
+    mqtt_task_cmd_t mqtt_task_cmd;
+
+    /* Subscribe with the configured parameters. */
+    for (uint32_t retry_count = 0; retry_count < MAX_SUBSCRIBE_RETRIES; retry_count++)
+    {
+        result = cy_mqtt_subscribe(mqtt_connection, &subscribe_info, SUBSCRIPTION_COUNT);
+        if (result == CY_RSLT_SUCCESS)
+        {
+            printf("MQTT client subscribed to the topic '%.*s' successfully.\n\n",
+                    subscribe_info.topic_len, subscribe_info.topic);
+            break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(MQTT_SUBSCRIBE_RETRY_INTERVAL_MS));
     }
 
-    printf("MQTT client subscribed to the topic '%.*s' successfully.\n\n",
-           subscribeInfo.topicFilterLength,
-           subscribeInfo.pTopicFilter);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        printf("MQTT Subscribe failed with error 0x%0X after %d retries...\n\n",
+               (int)result, MAX_SUBSCRIBE_RETRIES);
 
-    vTaskSuspend(NULL);
+        /* Notify the MQTT client task about the subscription failure */
+        mqtt_task_cmd = HANDLE_MQTT_SUBSCRIBE_FAILURE;
+        xQueueSend(mqtt_task_q, &mqtt_task_cmd, portMAX_DELAY);
+    }
 }
 
 /******************************************************************************
@@ -131,56 +198,43 @@ void subscriber_task(void *pvParameters)
  ******************************************************************************
  * Summary:
  *  Callback to handle incoming MQTT messages. This callback prints the
- *  contents of an incoming message and notifies the subscriber task with the
- *  LED state as per the received message.
+ *  contents of the incoming message and informs the subscriber task, via a
+ *  message queue, to turn on / turn off the device based on the received
+ *  message.
  *
  * Parameters:
- *  void *pCallbackContext : Parameter defined during MQTT Subscribe operation
- *                           using the IotMqttCallbackInfo_t.pCallbackContext
- *                           member (unused)
- *  IotMqttCallbackParam_t * pPublishInfo : Information about the incoming
- *                                          MQTT PUBLISH message passed by
- *                                          the MQTT library.
+ *  cy_mqtt_publish_info_t *received_msg_info : Information structure of the
+ *                                              received MQTT message
  *
  * Return:
  *  void
  *
  ******************************************************************************/
-static void mqtt_subscription_callback(void *pCallbackContext, IotMqttCallbackParam_t *pPublishInfo)
+void mqtt_subscription_callback(cy_mqtt_publish_info_t *received_msg_info)
 {
     /* Received MQTT message */
-    const char *pPayload = pPublishInfo->u.message.info.pPayload;
-    const size_t payloadLength = pPublishInfo->u.message.info.payloadLength;
+    const char *received_msg = received_msg_info->payload;
+    int received_msg_len = received_msg_info->payload_len;
 
-    /* To avoid compiler warnings */
-    (void)pCallbackContext;
+    printf("  Subsciber: Incoming MQTT message received:\n"
+           "    Publish topic name: %.*s\n"
+           "    Publish QoS: %d\n"
+           "    Publish payload: %.*s\n\n",
+           received_msg_info->topic_len, received_msg_info->topic,
+           (int) received_msg_info->qos,
+           received_msg_len, (const char *)received_msg);
 
-    /* Print information about the incoming PUBLISH message. */
-    printf("Incoming MQTT message received:\n"
-           "Subscription topic filter: %.*s\n"
-           "Published topic name: %.*s\n"
-           "Published QoS: %d\n"
-           "Published payload: %.*s\n\n",
-           pPublishInfo->u.message.topicFilterLength,
-           pPublishInfo->u.message.pTopicFilter,
-           pPublishInfo->u.message.info.topicNameLength,
-           pPublishInfo->u.message.info.pTopicName,
-           pPublishInfo->u.message.info.qos,
-           pPublishInfo->u.message.info.payloadLength,
-           pPayload);
-
-    if (payloadLength >= sizeof(sub_msg_payload))
+    if (received_msg_len >= sizeof(sub_msg_payload))
     {
         printf("Subscribed topic: '%.*s', received message too long. Buffer overflow.\n",
-               pPublishInfo->u.message.info.topicNameLength,
-               pPublishInfo->u.message.info.pTopicName);
+               received_msg_info->topic_len, received_msg_info->topic);
         return;
     }
 
     if (xSemaphoreTake(sem_sub_payload, portMAX_DELAY) == pdTRUE)
     {
         memset(sub_msg_payload, '\0', sizeof(sub_msg_payload));
-        memcpy(sub_msg_payload, pPayload, payloadLength);
+        memcpy(sub_msg_payload, received_msg, received_msg_len);
         xSemaphoreGive(sem_sub_payload);
 
         /* Notify the pasco2 configuration task. */
@@ -189,12 +243,11 @@ static void mqtt_subscription_callback(void *pCallbackContext, IotMqttCallbackPa
 }
 
 /******************************************************************************
- * Function Name: mqtt_unsubscribe
+ * Function Name: unsubscribe_from_topic
  ******************************************************************************
  * Summary:
  *  Function that unsubscribes from the topic specified by the macro
- *  'MQTT_SUB_TOPIC'. This operation is called during cleanup by the MQTT client
- *  task.
+ *  'MQTT_SUB_TOPIC'.
  *
  * Parameters:
  *  void
@@ -203,13 +256,15 @@ static void mqtt_subscription_callback(void *pCallbackContext, IotMqttCallbackPa
  *  void
  *
  ******************************************************************************/
-void mqtt_unsubscribe(void)
+static void unsubscribe_from_topic(void)
 {
-    IotMqttError_t result =
-        IotMqtt_UnsubscribeSync(mqttConnection, &subscribeInfo, SUBSCRIPTION_COUNT, 0, MQTT_TIMEOUT_MS);
-    if (result != IOT_MQTT_SUCCESS)
+    cy_rslt_t result = cy_mqtt_unsubscribe(mqtt_connection,
+                                           (cy_mqtt_unsubscribe_info_t *) &subscribe_info,
+                                           SUBSCRIPTION_COUNT);
+
+    if (result != CY_RSLT_SUCCESS)
     {
-        printf("MQTT Unsubscribe operation failed with error '%s'!\n", IotMqtt_strerror(result));
+        printf("MQTT Unsubscribe operation failed with error 0x%0X!\n", (int)result);
     }
 }
 

@@ -33,11 +33,26 @@
 #include "task.h"
 
 /*******************************************************************************
+* Macros
+*******************************************************************************/
+
+/* LED blink timer clock value in Hz  */
+#define LED_BLINK_TIMER_CLOCK_HZ          (10000)
+
+/* LED blink timer period value */
+#define LED_BLINK_TIMER_PERIOD            (9999)
+/*******************************************************************************
+* Function Prototypes
+*******************************************************************************/
+void timer_init(void);
+static void isr_timer(void *callback_arg, cyhal_timer_event_t event);
+/*******************************************************************************
  * Global Variables
- ******************************************************************************/
+ *******************************************************************************/
 /* This enables RTOS aware debugging. */
 volatile int uxTopUsedPriority;
-
+/* Timer object used for blinking the LED */
+cyhal_timer_t led_blink_timer;
 /******************************************************************************
  * Function Name: main
  ******************************************************************************
@@ -51,10 +66,10 @@ volatile int uxTopUsedPriority;
  * Return:
  *  int
  *
- ******************************************************************************/
-int main()
+ *******************************************************************************/
+int main(void)
 {
-    cy_rslt_t result;
+    cy_rslt_t result = CY_RSLT_SUCCESS;
 
     /* This enables RTOS aware debugging in OpenOCD. */
     uxTopUsedPriority = configMAX_PRIORITIES - 1;
@@ -70,27 +85,120 @@ int main()
     __enable_irq();
 
     /* Initialize retarget-io to use the debug UART port. */
-    cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, CY_RETARGET_IO_BAUDRATE);
+    result = cy_retarget_io_init(CYBSP_DEBUG_UART_TX, CYBSP_DEBUG_UART_RX, CY_RETARGET_IO_BAUDRATE);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
 
+    /* Initialize the User LED */
+    result = cyhal_gpio_init(CYBSP_USER_LED, CYHAL_GPIO_DIR_OUTPUT,
+                             CYHAL_GPIO_DRIVE_STRONG, CYBSP_LED_STATE_OFF);
+    /* Initialize timer to toggle the LED */
+    timer_init();
     /* \x1b[2J\x1b[;H - ANSI ESC sequence to clear screen. */
     printf("\x1b[2J\x1b[;H");
     printf("=====================================================================\n");
-    printf("CE229889 - AnyCloud Example: MQTT Client with xensiv sensors: PASCO2\n");
+    printf("CE233236 - AnyCloud Example MQTT Client with xensiv sensors: PASCO2\n");
     printf("=====================================================================\n\n");
 
     /* Create the MQTT Client task. */
-    xTaskCreate(mqtt_client_task,
-                "MQTT Client task",
-                MQTT_CLIENT_TASK_STACK_SIZE,
-                NULL,
-                MQTT_CLIENT_TASK_PRIORITY,
-                NULL);
+    xTaskCreate(mqtt_client_task, "MQTT Client task", MQTT_CLIENT_TASK_STACK_SIZE,
+                NULL, MQTT_CLIENT_TASK_PRIORITY, NULL);
 
     /* Start the FreeRTOS scheduler. */
     vTaskStartScheduler();
 
     /* Should never get here. */
     CY_ASSERT(0);
+}
+
+/*******************************************************************************
+* Function Name: timer_init
+********************************************************************************
+* Summary:
+* This function creates and configures a Timer object. The timer ticks
+* continuously and produces a periodic interrupt on every terminal count
+* event. The period is defined by the 'period' and 'compare_value' of the
+* timer configuration structure 'led_blink_timer_cfg'. This application is
+* designed to produce an interrupt every 1 second.
+*
+* Parameters:
+*  none
+*
+*******************************************************************************/
+ void timer_init(void)
+ {
+    cy_rslt_t result;
+
+    const cyhal_timer_cfg_t led_blink_timer_cfg =
+    {
+        .compare_value = 0,                 /* Timer compare value, not used */
+        .period = LED_BLINK_TIMER_PERIOD,   /* Defines the timer period */
+        .direction = CYHAL_TIMER_DIR_UP,    /* Timer counts up */
+        .is_compare = false,                /* Don't use compare mode */
+        .is_continuous = true,              /* Run timer indefinitely */
+        .value = 0                          /* Initial value of counter */
+    };
+
+    /* Initialize the timer object. Does not use input pin ('pin' is NC) and
+     * does not use a pre-configured clock source ('clk' is NULL). */
+    result = cyhal_timer_init(&led_blink_timer, NC, NULL);
+
+    /* timer init failed. Stop program execution */
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+
+    /* Configure timer period and operation mode such as count direction,
+       duration */
+    result = cyhal_timer_configure(&led_blink_timer, &led_blink_timer_cfg);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+
+    /* Set the frequency of timer's clock source */
+    result = cyhal_timer_set_frequency(&led_blink_timer, LED_BLINK_TIMER_CLOCK_HZ);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+
+    /* Assign the ISR to execute on timer interrupt */
+    cyhal_timer_register_callback(&led_blink_timer, isr_timer, NULL);
+
+    /* Set the event on which timer interrupt occurs and enable it */
+    cyhal_timer_enable_event(&led_blink_timer, CYHAL_TIMER_IRQ_TERMINAL_COUNT,
+                             CYHAL_ISR_PRIORITY_DEFAULT, true);
+
+    /* Start the timer with the configured settings */
+    result = cyhal_timer_start(&led_blink_timer);
+    if (result != CY_RSLT_SUCCESS)
+    {
+        CY_ASSERT(0);
+    }
+ }
+
+/*******************************************************************************
+* Function Name: isr_timer
+********************************************************************************
+* Summary:
+* This is the interrupt handler function for the timer interrupt.
+*
+* Parameters:
+*    callback_arg    Arguments passed to the interrupt callback
+*    event            Timer/counter interrupt triggers
+*
+*******************************************************************************/
+static void isr_timer(void *callback_arg, cyhal_timer_event_t event)
+{
+    (void) callback_arg;
+    (void) event;
+
+    /* Invert the USER LED state */
+     cyhal_gpio_toggle(CYBSP_USER_LED);
 }
 
 /* [] END OF FILE */

@@ -45,9 +45,9 @@
 #define WIFI_SECURITY                     CY_WCM_SECURITY_WPA2_AES_PSK
 
 /* Maximum Wi-Fi re-connection limit. */
-#define MAX_WIFI_CONN_RETRIES             (10u)
+#define MAX_WIFI_CONN_RETRIES             (120u)
 
 /* Wi-Fi re-connection time interval in milliseconds. */
-#define WIFI_CONN_RETRY_INTERVAL_MS       (2000)
+#define WIFI_CONN_RETRY_INTERVAL_MS       (5000)
 
 #endif /* WIFI_CONFIG_H_ */

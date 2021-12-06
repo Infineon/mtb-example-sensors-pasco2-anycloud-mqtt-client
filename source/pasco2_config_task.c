@@ -46,13 +46,6 @@
 TaskHandle_t pasco2_config_task_handle = NULL;
 
 /*******************************************************************************
- * Local Variables
- ******************************************************************************/
-static mtb_pasco2_config_t pasco2_config = {0};
-static char local_pub_msg[MQTT_PUB_MSG_MAX_SIZE] = {0};
-static char json_value[32] = {0};
-
-/*******************************************************************************
  * Function Name: json_parser_cb
  *******************************************************************************
  * Summary:
@@ -60,52 +53,77 @@ static char json_value[32] = {0};
  *
  * Parameters:
  *   json_object: incoming json object
- *   arg: callback data. Here it should be the context of mtb_pasco2_context_t.
+ *   arg: callback data. Here it should be the context of xensiv_pasco2_t.
  *
  * Return:
  *   none
  ******************************************************************************/
 static cy_rslt_t json_parser_cb(cy_JSON_object_t *json_object, void *arg)
 {
-    mtb_pasco2_context_t *context = (mtb_pasco2_context_t *)arg;
+    xensiv_pasco2_t *context = (xensiv_pasco2_t *)arg;
 
     bool bad_entry = false;
-    /* Reset and get new value for each new json object entry */
-    memset(json_value, '\0', 32);
+    char json_value[32] = {0};
     memcpy(json_value, json_object->value, json_object->value_length);
+
+    publisher_data_t publisher_q_data = {0};
+    publisher_q_data.cmd = PUBLISH_MQTT_MSG;
 
     /* Supported keys and values for pasco2 configuration */
     if (memcmp(json_object->object_string, "pasco2_measurement_period", json_object->object_string_length) == 0)
     {
-        pasco2_config.measurement_period = atoi(json_value);
-        if (mtb_pasco2_set_config(context, &pasco2_config) == MTB_PASCO2_SUCCESS)
+        const uint16_t measurement_period = atoi(json_value);
+        if ((measurement_period < XENSIV_PASCO2_MEAS_RATE_MIN) || (measurement_period > XENSIV_PASCO2_MEAS_RATE_MAX))
         {
-            snprintf(local_pub_msg,
-                     sizeof(local_pub_msg),
-                     "Config => %.*s: %.*s",
-                     json_object->object_string_length,
-                     json_object->object_string,
-                     json_object->value_length,
-                     json_object->value);
+            printf("CO2 sensor measurement period configuration error, Valid range is [10-4095]\n\n");
         }
         else
         {
-            snprintf(local_pub_msg, sizeof(local_pub_msg), "pasco2_measurement_period set configuration failed.");
+            xensiv_pasco2_measurement_config_t meas_config = {
+                .b.op_mode = XENSIV_PASCO2_OP_MODE_IDLE,
+                .b.boc_cfg = XENSIV_PASCO2_BOC_CFG_AUTOMATIC
+            };
+            int32_t status = xensiv_pasco2_set_measurement_config(context, meas_config);
+
+            status |= xensiv_pasco2_set_measurement_rate(context, measurement_period);
+
+            meas_config = (xensiv_pasco2_measurement_config_t){
+                .b.op_mode = XENSIV_PASCO2_OP_MODE_CONTINUOUS,
+                .b.boc_cfg = XENSIV_PASCO2_BOC_CFG_AUTOMATIC
+            };
+            status |= xensiv_pasco2_set_measurement_config(context, meas_config);
+
+            if (status == CY_RSLT_SUCCESS)
+            {
+                pasco2_process_delay_s = measurement_period;
+                snprintf(publisher_q_data.data,
+                        sizeof(publisher_q_data.data),
+                        "Config => %.*s: %.*s",
+                        json_object->object_string_length,
+                        json_object->object_string,
+                        json_object->value_length,
+                        json_object->value);
+            }
+            else
+            {
+                snprintf(publisher_q_data.data, sizeof(publisher_q_data.data),
+                         "pasco2_measurement_period set configuration failed.");
+            }
         }
     }
     else
     {
         /* Invalid input json key */
         bad_entry = true;
-        snprintf(local_pub_msg,
-                 sizeof(local_pub_msg),
+        snprintf(publisher_q_data.data,
+                 sizeof(publisher_q_data.data),
                  "{\"%.*s\": \"invalid json key\"}",
                  json_object->object_string_length,
                  json_object->object_string);
     }
 
-    /* Send message back to publish queue. If queue is full, 'local_pub_msg' will be dropped. So no result checking. */
-    xQueueSendToBack(mqtt_pub_q, local_pub_msg, 0);
+    /* Send message back to publish queue. */
+    xQueueSendToBack(publisher_task_q, &publisher_q_data, 0);
 
     return bad_entry ? CY_RSLT_JSON_GENERIC_ERROR : CY_RSLT_SUCCESS;
 }
@@ -131,7 +149,7 @@ void pasco2_config_task(void *pvParameters)
     (void)pvParameters;
 
     /* Register JSON parser to parse input configuration JSON string */
-    cy_JSON_parser_register_callback(json_parser_cb, (void *)&mtb_pasco2_context);
+    cy_JSON_parser_register_callback(json_parser_cb, (void *)&xensiv_pasco2);
 
     while (true)
     {
@@ -144,6 +162,7 @@ void pasco2_config_task(void *pvParameters)
             /* Get mutex to block mtb_radar_sensing_process in radar task */
             if (xSemaphoreTake(sem_pasco2_context, portMAX_DELAY) == pdTRUE)
             {
+                printf("parse config ... \n");
                 result = cy_JSON_parser(sub_msg_payload, strlen(sub_msg_payload));
                 if (result != CY_RSLT_SUCCESS)
                 {

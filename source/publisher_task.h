@@ -39,17 +39,32 @@
 
 #define MQTT_PUB_QUEUE_LENGTH (10u)
 #define MQTT_PUB_MSG_MAX_SIZE (64u)
+/*******************************************************************************
+ * Typedefines
+ ******************************************************************************/
+/* Commands for the Publisher Task. */
+typedef enum
+{
+    PUBLISHER_INIT,
+    PUBLISHER_DEINIT,
+    PUBLISH_MQTT_MSG
+} publisher_cmd_t;
+
+/* Struct to be passed via the publisher task queue */
+typedef struct{
+    publisher_cmd_t cmd;
+    char data[MQTT_PUB_MSG_MAX_SIZE];
+} publisher_data_t;
 
 /*******************************************************************************
  * Extern Variables
  ******************************************************************************/
 extern TaskHandle_t publisher_task_handle;
-extern QueueHandle_t mqtt_pub_q;
+extern QueueHandle_t publisher_task_q;
 
 /*******************************************************************************
  * Function Prototypes
  ******************************************************************************/
 void publisher_task(void *pvParameters);
-void publisher_cleanup(void);
 
 /* [] END OF FILE */

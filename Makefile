@@ -64,13 +64,6 @@ CONFIG=Debug
 # If set to "true" or "1", display full command-lines when building.
 VERBOSE=
 
-# The MQTT Client library does not support secure connections to the Mosquitto
-# broker by default, because the server uses the SHA1 hashing algorithm which
-# is considered  a weak message digest and is therefore not enabled by default.
-# However, if it is required to connect securely to the Mosquitto Broker set
-# this macro to "true" or "1".
-ENABLE_SECURE_MOSQUITTO_BROKER_SUPPORT=0
-
 ################################################################################
 # Advanced Configuration
 ################################################################################
@@ -85,7 +78,7 @@ ENABLE_SECURE_MOSQUITTO_BROKER_SUPPORT=0
 # ... then code in directories named COMPONENT_foo and COMPONENT_bar will be
 # added to the build
 #
-COMPONENTS=FREERTOS LWIP MBEDTLS RTOS_AWARE
+COMPONENTS=FREERTOS LWIP MBEDTLS SECURE_SOCKETS RTOS_AWARE 
 
 # Like COMPONENTS, but disable optional code that was enabled by default.
 DISABLE_COMPONENTS=
@@ -104,16 +97,10 @@ INCLUDES=./configs
 MBEDTLSFLAGS = MBEDTLS_USER_CONFIG_FILE='"mbedtls_user_config.h"'
 
 # Add additional defines to the build process (without a leading -D).
-DEFINES=$(MBEDTLSFLAGS) CYBSP_WIFI_CAPABLE CY_RETARGET_IO_CONVERT_LF_TO_CRLF
-
-# Enable support for Mosquitto Broker based on 'ENABLE_SECURE_MOSQUITTO_BROKER_
-# SUPPORT' variable. See the MQTT Client library's README for more information.
-ifneq (,$(filter $(ENABLE_SECURE_MOSQUITTO_BROKER_SUPPORT),true 1))
-DEFINES+=CY_MQTT_ENABLE_SECURE_TEST_MOSQUITTO_SUPPORT
-endif
+DEFINES=$(MBEDTLSFLAGS) CYBSP_WIFI_CAPABLE CY_RETARGET_IO_CONVERT_LF_TO_CRLF 
 
 # CY8CPROTO-062-4343W board shares the same GPIO for the user button (USER BTN1)
-# and the CYW4343W host wake up pin. Since this example uses the GPIO for
+# and the CYW4343W host wake up pin. Since this example uses the GPIO for  
 # interfacing with the user button, the SDIO interrupt to wake up the host is
 # disabled by setting CY_WIFI_HOST_WAKE_SW_FORCE to '0'.
 ifeq ($(TARGET), CY8CPROTO-062-4343W)

@@ -27,38 +27,37 @@
 #pragma once
 
 #include "FreeRTOS.h"
-#include "iot_mqtt.h"
 #include "queue.h"
+#include "cy_mqtt_api.h"
+
 
 /*******************************************************************************
- * Macros
- ******************************************************************************/
+* Macros
+*******************************************************************************/
 /* Task parameters for MQTT Client Task. */
-#define MQTT_CLIENT_TASK_PRIORITY   (2)
-#define MQTT_CLIENT_TASK_STACK_SIZE (1024 * 2)
+#define MQTT_CLIENT_TASK_PRIORITY       (2)
+#define MQTT_CLIENT_TASK_STACK_SIZE     (1024 * 2)
 
 /*******************************************************************************
- * Global Variables
- ******************************************************************************/
-/* Data-type of various MQTT operation results. */
+* Global Variables
+*******************************************************************************/
+/* Commands for the MQTT Client Task. */
 typedef enum
 {
-    MQTT_SUBSCRIBE_SUCCESS,
-    MQTT_SUBSCRIBE_FAILURE,
-    MQTT_PUBLISH_SUCCESS,
-    MQTT_PUBLISH_FAILURE,
-    MQTT_DISCONNECT
-} mqtt_result_t;
+    HANDLE_MQTT_SUBSCRIBE_FAILURE,
+    HANDLE_MQTT_PUBLISH_FAILURE,
+    HANDLE_DISCONNECTION
+} mqtt_task_cmd_t;
 
 /*******************************************************************************
  * Extern variables
  ******************************************************************************/
-extern IotMqttConnection_t mqttConnection;
-extern QueueHandle_t mqtt_status_q;
+extern cy_mqtt_t mqtt_connection;
+extern QueueHandle_t mqtt_task_q;
 
 /*******************************************************************************
- * Function Prototypes
- ******************************************************************************/
+* Function Prototypes
+*******************************************************************************/
 void mqtt_client_task(void *pvParameters);
 
 /* [] END OF FILE */

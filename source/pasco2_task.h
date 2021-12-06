@@ -33,17 +33,15 @@
 #include "task.h"
 
 /* Header file for library */
-#include "mtb_pasco2.h"
+#include "xensiv_pasco2_mtb.h"
 
 /*******************************************************************************
  * Macros
  ******************************************************************************/
-#define PASCO2_TASK_NAME       "PASCO2 SENSOR TASK"
+#define PASCO2_TASK_NAME       "CO2 SENSOR TASK"
 #define PASCO2_TASK_PRIORITY   (2)
 #define PASCO2_TASK_STACK_SIZE (1024 * 4)
 
-/* Delay time after each call to Ifx_RadarSensing_Process */
-#define PASCO2_PROCESS_DELAY (10000)
 
 /*******************************************************************************
  * Global Variables
@@ -51,8 +49,9 @@
 extern TaskHandle_t pasco2_task_handle;
 
 extern SemaphoreHandle_t sem_pasco2_context;
-extern mtb_pasco2_context_t mtb_pasco2_context;
-
+extern xensiv_pasco2_t xensiv_pasco2;
+extern cyhal_timer_t led_blink_timer;
+extern uint32_t pasco2_process_delay_s;
 /*******************************************************************************
  * Functions
  *******************************************************************************/
