@@ -98,7 +98,7 @@ void publisher_task(void *pvParameters)
     /* Status variable */
     cy_rslt_t result;
 
-    publisher_data_t publisher_q_data = {0};
+    publisher_data_t publisher_q_data;
 
     /* Command to the MQTT client task */
     mqtt_task_cmd_t mqtt_task_cmd;

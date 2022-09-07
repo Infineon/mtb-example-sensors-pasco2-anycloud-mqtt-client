@@ -70,7 +70,7 @@
 TaskHandle_t pasco2_task_handle = NULL;
 /* Semaphore to protect PASCO2 driver context */
 SemaphoreHandle_t sem_pasco2_context = NULL;
-xensiv_pasco2_t xensiv_pasco2 = {0};
+xensiv_pasco2_t xensiv_pasco2;
 /* Delay time after each call to PAS CO2 Process.Default is 10 seconds */
 uint32_t pasco2_process_delay_s = 10;
 
@@ -167,8 +167,8 @@ void pasco2_task(void *pvParameters)
     }
     /* Configure PAS CO2 Wing board interrupt to enable voltage converter */
     xensiv_pasco2_interrupt_config_t int_config = {
-    .b.int_func = XENSIV_PASCO2_INTERRUPT_FUNCTION_EARLY,
-    .b.int_typ = (uint32_t)XENSIV_PASCO2_INTERRUPT_TYPE_HIGH_ACTIVE
+    .b.int_func = XENSIV_PASCO2_INTERRUPT_FUNCTION_NONE,
+    .b.int_typ = (uint32_t)XENSIV_PASCO2_INTERRUPT_TYPE_LOW_ACTIVE
     };
     result = xensiv_pasco2_set_interrupt_config(&xensiv_pasco2, int_config);
     if (result != CY_RSLT_SUCCESS)
@@ -209,7 +209,7 @@ void pasco2_task(void *pvParameters)
     /* Turn on status LED on PAS CO2 Wing Board to indicate normal operation */
     cyhal_gpio_write(MTB_PASCO2_LED_OK, MTB_PASCO_LED_STATE_ON);
 
-    publisher_data_t publisher_q_data = {0};
+    publisher_data_t publisher_q_data;
     publisher_q_data.cmd = PUBLISH_MQTT_MSG;
 
     for (;;)
